@@ -1,0 +1,507 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Tevel Data Viewer</title>
+    <style>
+      :root {
+        color-scheme: light;
+        font-family: Arial, Helvetica, sans-serif;
+        background: #f5f7fa;
+        color: #18212f;
+      }
+
+      body {
+        margin: 0;
+      }
+
+      header {
+        background: #ffffff;
+        border-bottom: 1px solid #d9e1ea;
+        padding: 22px 28px;
+        position: sticky;
+        top: 0;
+        z-index: 2;
+      }
+
+      h1 {
+        font-size: 28px;
+        margin: 0 0 14px;
+      }
+
+      .toolbar {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 10px;
+      }
+
+      input,
+      select,
+      button {
+        border: 1px solid #b9c5d3;
+        border-radius: 6px;
+        font: inherit;
+        padding: 9px 11px;
+        background: #ffffff;
+      }
+
+      input {
+        min-width: min(360px, 100%);
+      }
+
+      button {
+        cursor: pointer;
+      }
+
+      main {
+        padding: 24px 28px 36px;
+      }
+
+      .status {
+        color: #506176;
+        margin-bottom: 18px;
+      }
+
+      .dataset {
+        background: #ffffff;
+        border: 1px solid #d9e1ea;
+        border-radius: 8px;
+        margin-bottom: 18px;
+        overflow: hidden;
+      }
+
+      .dataset-header {
+        align-items: center;
+        border-bottom: 1px solid #d9e1ea;
+        display: flex;
+        flex-wrap: wrap;
+        gap: 10px;
+        justify-content: space-between;
+        padding: 14px 16px;
+      }
+
+      h2 {
+        font-size: 18px;
+        margin: 0;
+      }
+
+      .meta {
+        color: #506176;
+        font-size: 14px;
+        margin-top: 4px;
+      }
+
+      .error {
+        color: #9d1c1c;
+        padding: 14px 16px;
+      }
+
+      .chart-area {
+        padding: 12px 16px 16px;
+      }
+
+      .notebook-graph {
+        background: #ffffff;
+        display: block;
+        height: auto;
+        width: 100%;
+      }
+
+      canvas {
+        display: block;
+        height: 360px;
+        width: 100%;
+      }
+
+      .legend {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px 14px;
+        margin-bottom: 10px;
+      }
+
+      .legend-item {
+        align-items: center;
+        color: #506176;
+        display: inline-flex;
+        font-size: 13px;
+        gap: 6px;
+      }
+
+      .swatch {
+        border-radius: 50%;
+        height: 10px;
+        width: 10px;
+      }
+
+      @media (max-width: 700px) {
+        header,
+        main {
+          padding-left: 16px;
+          padding-right: 16px;
+        }
+
+        input,
+        select,
+        button {
+          width: 100%;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <header>
+      <h1>Tevel Data Viewer</h1>
+      <div class="toolbar">
+        <input id="search" type="search" placeholder="Search graphs">
+        <select id="satellite">
+          <option value="">All satellites</option>
+        </select>
+        <button id="reload" type="button">Reload data</button>
+      </div>
+    </header>
+    <main>
+      <div id="status" class="status">Loading data...</div>
+      <section id="content"></section>
+    </main>
+
+    <script>
+      const statusEl = document.querySelector("#status");
+      const contentEl = document.querySelector("#content");
+      const searchEl = document.querySelector("#search");
+      const satelliteEl = document.querySelector("#satellite");
+      const reloadEl = document.querySelector("#reload");
+      const colors = ["#2563eb", "#dc2626", "#16a34a", "#9333ea", "#ea580c", "#0891b2"];
+      let sources = [];
+
+      async function loadData() {
+        statusEl.textContent = "Loading data...";
+        contentEl.innerHTML = "";
+
+        try {
+          const response = await fetch(`data.json?time=${Date.now()}`);
+          if (!response.ok) {
+            throw new Error(`HTTP ${response.status}`);
+          }
+          const data = await response.json();
+          sources = data.sources || [];
+          fillSatelliteFilter();
+          render();
+        } catch (error) {
+          statusEl.textContent = `Failed to load data: ${error.message}`;
+        }
+      }
+
+      function fillSatelliteFilter() {
+        const current = satelliteEl.value;
+        const satellites = [...new Set(sources.map((source) => source.satellite))].sort();
+        satelliteEl.innerHTML = `<option value="">All satellites</option>`;
+        for (const satellite of satellites) {
+          const option = document.createElement("option");
+          option.value = satellite;
+          option.textContent = satellite;
+          satelliteEl.append(option);
+        }
+        satelliteEl.value = satellites.includes(current) ? current : "";
+      }
+
+      function render() {
+        const query = searchEl.value.trim().toLowerCase();
+        const satellite = satelliteEl.value;
+        const filtered = sources.filter((source) => {
+          if (satellite && source.satellite !== satellite) {
+            return false;
+          }
+          if (!query) {
+            return true;
+          }
+          const haystack = [
+            source.satellite,
+            source.name,
+            source.metric,
+            source.path,
+            ...source.columns,
+          ]
+            .join(" ")
+            .toLowerCase();
+          return haystack.includes(query);
+        });
+
+        const totalRows = filtered.reduce((sum, source) => sum + source.row_count, 0);
+        statusEl.textContent = `${filtered.length} datasets, ${totalRows.toLocaleString()} rows`;
+        contentEl.innerHTML = "";
+
+        for (const source of filtered) {
+          contentEl.append(renderSource(source, query));
+        }
+      }
+
+      function renderSource(source, query) {
+        const article = document.createElement("article");
+        article.className = "dataset";
+
+        const header = document.createElement("div");
+        header.className = "dataset-header";
+        header.innerHTML = `
+          <div>
+            <h2>${escapeHtml(source.satellite)} / ${escapeHtml(source.chart?.title || source.metric || source.name)}</h2>
+            <div class="meta">${escapeHtml(source.path)}${source.row_count ? ` · ${source.row_count.toLocaleString()} rows` : ""}</div>
+          </div>
+          ${source.url ? `<a href="${escapeAttribute(source.url)}" target="_blank" rel="noreferrer">CSV source</a>` : ""}
+        `;
+        article.append(header);
+
+        if (source.image_url) {
+          const area = document.createElement("div");
+          area.className = "chart-area";
+          area.innerHTML = `<img class="notebook-graph" src="${escapeAttribute(source.image_url)}" alt="${escapeAttribute(source.satellite)} ${escapeAttribute(source.metric || source.name)} graph">`;
+          article.append(area);
+          return article;
+        }
+
+        if (source.error) {
+          const error = document.createElement("div");
+          error.className = "error";
+          error.textContent = source.error;
+          article.append(error);
+          return article;
+        }
+
+        const chart = buildChartData(source);
+        if (!chart.series.length) {
+          const empty = document.createElement("div");
+          empty.className = "error";
+          empty.textContent = "No numeric columns found to graph.";
+          article.append(empty);
+          return article;
+        }
+
+        const area = document.createElement("div");
+        area.className = "chart-area";
+        area.innerHTML = `
+          <div class="legend">
+            ${chart.series.map((serie, index) => `
+              <span class="legend-item">
+                <span class="swatch" style="background:${colors[index % colors.length]}"></span>
+                ${escapeHtml(serie.name)}
+              </span>
+            `).join("")}
+          </div>
+          <canvas></canvas>
+        `;
+        article.append(area);
+        requestAnimationFrame(() => drawChart(area.querySelector("canvas"), chart));
+        return article;
+      }
+
+      function buildChartData(source) {
+        const timeColumn = source.chart?.x_column
+          || source.columns.find((column) => column.toLowerCase() === "time")
+          || source.columns.find((column) => column.toLowerCase().includes("time"));
+        const chartSeries = source.chart?.series?.length
+          ? source.chart.series
+          : source.columns.map((column) => ({ column, label: column, window: 1 }));
+        const usableSeries = chartSeries.filter((serie) => {
+          const column = serie.column;
+          if (!column || column === timeColumn || column.toLowerCase() === "raw") {
+            return false;
+          }
+          const sample = source.rows.slice(0, 80).map((row) => toNumber(row[column])).filter(Number.isFinite);
+          return sample.length >= Math.min(3, source.rows.length);
+        });
+        const maxPoints = 900;
+        const sortedRows = [...source.rows].sort((left, right) => compareX(left[timeColumn], right[timeColumn]));
+        const step = Math.max(1, Math.ceil(sortedRows.length / maxPoints));
+        const fullLabels = sortedRows.map((row, index) => formatLabel(row[timeColumn], index));
+        const fullSeries = usableSeries.map((serie) => ({
+          name: serie.label || serie.column,
+          values: rollingMean(sortedRows.map((row) => toNumber(row[serie.column])), serie.window || 1),
+        }));
+        const indexes = sortedRows.map((_, index) => index).filter((index) => index % step === 0);
+        const labels = indexes.map((index) => fullLabels[index]);
+        const series = fullSeries.map((serie) => ({
+          name: serie.name,
+          values: indexes.map((index) => serie.values[index]),
+        }));
+        return { labels, series };
+      }
+
+      function rollingMean(values, windowSize) {
+        if (windowSize <= 1) {
+          return values;
+        }
+        const result = [];
+        let sum = 0;
+        let count = 0;
+        const queue = [];
+        for (const value of values) {
+          queue.push(value);
+          if (Number.isFinite(value)) {
+            sum += value;
+            count += 1;
+          }
+          if (queue.length > windowSize) {
+            const removed = queue.shift();
+            if (Number.isFinite(removed)) {
+              sum -= removed;
+              count -= 1;
+            }
+          }
+          result.push(queue.length === windowSize && count > 0 ? sum / count : NaN);
+        }
+        return result;
+      }
+
+      function compareX(left, right) {
+        const leftDate = parseFlexibleDate(left);
+        const rightDate = parseFlexibleDate(right);
+        if (Number.isFinite(leftDate) && Number.isFinite(rightDate)) {
+          return leftDate - rightDate;
+        }
+        const leftNumber = toNumber(left);
+        const rightNumber = toNumber(right);
+        if (Number.isFinite(leftNumber) && Number.isFinite(rightNumber)) {
+          return leftNumber - rightNumber;
+        }
+        return String(left ?? "").localeCompare(String(right ?? ""));
+      }
+
+      function drawChart(canvas, chart) {
+        const rect = canvas.getBoundingClientRect();
+        const scale = window.devicePixelRatio || 1;
+        canvas.width = Math.max(1, Math.floor(rect.width * scale));
+        canvas.height = Math.max(1, Math.floor(rect.height * scale));
+
+        const ctx = canvas.getContext("2d");
+        ctx.scale(scale, scale);
+        ctx.clearRect(0, 0, rect.width, rect.height);
+
+        const padding = { top: 18, right: 18, bottom: 42, left: 64 };
+        const width = rect.width - padding.left - padding.right;
+        const height = rect.height - padding.top - padding.bottom;
+        const values = chart.series.flatMap((serie) => serie.values).filter(Number.isFinite);
+        if (!values.length || width <= 0 || height <= 0) {
+          return;
+        }
+
+        let min = Math.min(...values);
+        let max = Math.max(...values);
+        if (min === max) {
+          min -= 1;
+          max += 1;
+        }
+
+        ctx.strokeStyle = "#d9e1ea";
+        ctx.lineWidth = 1;
+        ctx.fillStyle = "#506176";
+        ctx.font = "12px Arial, Helvetica, sans-serif";
+
+        for (let tick = 0; tick <= 4; tick += 1) {
+          const y = padding.top + (height * tick) / 4;
+          const value = max - ((max - min) * tick) / 4;
+          ctx.beginPath();
+          ctx.moveTo(padding.left, y);
+          ctx.lineTo(padding.left + width, y);
+          ctx.stroke();
+          ctx.fillText(formatNumber(value), 8, y + 4);
+        }
+
+        ctx.strokeStyle = "#9aa8b8";
+        ctx.beginPath();
+        ctx.moveTo(padding.left, padding.top);
+        ctx.lineTo(padding.left, padding.top + height);
+        ctx.lineTo(padding.left + width, padding.top + height);
+        ctx.stroke();
+
+        const labelIndexes = [0, Math.floor((chart.labels.length - 1) / 2), chart.labels.length - 1]
+          .filter((value, index, array) => value >= 0 && array.indexOf(value) === index);
+        for (const index of labelIndexes) {
+          const x = padding.left + (width * index) / Math.max(1, chart.labels.length - 1);
+          ctx.fillText(chart.labels[index], Math.min(x, rect.width - 130), rect.height - 14);
+        }
+
+        chart.series.forEach((serie, index) => {
+          ctx.strokeStyle = colors[index % colors.length];
+          ctx.lineWidth = 2;
+          ctx.beginPath();
+          let hasPoint = false;
+          serie.values.forEach((value, pointIndex) => {
+            if (!Number.isFinite(value)) {
+              return;
+            }
+            const x = padding.left + (width * pointIndex) / Math.max(1, serie.values.length - 1);
+            const y = padding.top + height - ((value - min) / (max - min)) * height;
+            if (hasPoint) {
+              ctx.lineTo(x, y);
+            } else {
+              ctx.moveTo(x, y);
+              hasPoint = true;
+            }
+          });
+          ctx.stroke();
+        });
+      }
+
+      function toNumber(value) {
+        if (value === null || value === undefined || value === "") {
+          return NaN;
+        }
+        return Number(String(value).replace(/,/g, ""));
+      }
+
+      function formatLabel(value, fallback) {
+        if (!value) {
+          return String(fallback + 1);
+        }
+        const time = parseFlexibleDate(value);
+        if (!Number.isFinite(time)) {
+          return String(value).slice(0, 16);
+        }
+        return new Date(time).toLocaleDateString();
+      }
+
+      function parseFlexibleDate(value) {
+        if (!value) {
+          return NaN;
+        }
+        const text = String(value).trim();
+        const dayFirst = text.match(/^(\d{1,2})[\/.-](\d{1,2})[\/.-](\d{2,4})(?:[ T](\d{1,2}):(\d{2})(?::(\d{2}))?)?/);
+        if (dayFirst) {
+          const [, day, month, year, hour = "0", minute = "0", second = "0"] = dayFirst;
+          const fullYear = year.length === 2 ? Number(`20${year}`) : Number(year);
+          return new Date(fullYear, Number(month) - 1, Number(day), Number(hour), Number(minute), Number(second)).getTime();
+        }
+        return Date.parse(text);
+      }
+
+      function formatNumber(value) {
+        return Math.abs(value) >= 1000 ? value.toExponential(1) : value.toFixed(2).replace(/\.00$/, "");
+      }
+
+      function escapeHtml(value) {
+        return String(value).replace(/[&<>"']/g, (char) => ({
+          "&": "&amp;",
+          "<": "&lt;",
+          ">": "&gt;",
+          '"': "&quot;",
+          "'": "&#39;",
+        }[char]));
+      }
+
+      function escapeAttribute(value) {
+        return escapeHtml(value).replace(/`/g, "&#96;");
+      }
+
+      searchEl.addEventListener("input", render);
+      satelliteEl.addEventListener("change", render);
+      reloadEl.addEventListener("click", () => {
+        reloadEl.dataset.refresh = "1";
+        loadData().finally(() => {
+          reloadEl.dataset.refresh = "";
+        });
+      });
+      loadData();
+    </script>
+  </body>
+</html>
