@@ -72,8 +72,13 @@ def notebook_sources(refresh=False):
             if notebook_has_image(data)
             else None
         )
+        output_path = (
+            f"/api/notebook-output?path={quote(str(notebook.relative_to(ROOT)))}"
+            if notebook_has_html(data)
+            else None
+        )
 
-        if not urls and not image_path:
+        if not urls and not image_path and not output_path:
             sources.append(
                 {
                     "satellite": notebook.parent.name,
@@ -98,6 +103,7 @@ def notebook_sources(refresh=False):
                     "chart": chart,
                     "path": str(notebook.relative_to(ROOT)),
                     "image_url": image_path,
+                    "output_url": output_path,
                     "columns": [],
                     "rows": [],
                     "row_count": 0,
@@ -107,12 +113,10 @@ def notebook_sources(refresh=False):
 
         for index, url in enumerate(urls, start=1):
             label = notebook.stem if len(urls) == 1 else f"{notebook.stem} ({index})"
-            fetch_jobs.append((notebook, metric, label, url, chart, image_path))
+            fetch_jobs.append((notebook, metric, label, url, chart, image_path, output_path))
 
     with ThreadPoolExecutor(max_workers=8) as executor:
         sources.extend(executor.map(lambda job: fetch_csv_source(*job), fetch_jobs))
-
-    sources.extend(derived_sources(sources))
 
     _cache["time"] = monotonic()
     _cache["sources"] = sources
@@ -397,6 +401,14 @@ def notebook_has_image(data):
     )
 
 
+def notebook_has_html(data):
+    return any(
+        "text/html" in output.get("data", {}) or "application/vnd.plotly.v1+json" in output.get("data", {})
+        for cell in data.get("cells", [])
+        for output in cell.get("outputs", [])
+    )
+
+
 def notebook_image(notebook):
     data = json.loads(notebook.read_text(encoding="utf-8"))
     for cell in data.get("cells", []):
@@ -407,13 +419,57 @@ def notebook_image(notebook):
     return None
 
 
-def fetch_csv_source(notebook, metric, label, url, chart, image_path):
+def notebook_html(notebook):
+    data = json.loads(notebook.read_text(encoding="utf-8"))
+    for cell in data.get("cells", []):
+        for output in cell.get("outputs", []):
+            output_data = output.get("data", {})
+            html = output_data.get("text/html")
+            if html:
+                return "".join(html) if isinstance(html, list) else str(html)
+            plotly = output_data.get("application/vnd.plotly.v1+json")
+            if plotly:
+                return plotly_html(plotly)
+    return None
+
+
+def plotly_html(plotly):
+    spec = json.dumps(plotly, ensure_ascii=False)
+    return f"""<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
+  <style>
+    html, body, #plot {{
+      width: 100%;
+      height: 100%;
+      margin: 0;
+    }}
+  </style>
+</head>
+<body>
+  <div id="plot"></div>
+  <script>
+    const spec = {spec};
+    Plotly.newPlot("plot", spec.data || [], spec.layout || {{}}, {{
+      ...(spec.config || {{}}),
+      responsive: true
+    }});
+  </script>
+</body>
+</html>"""
+
+
+def fetch_csv_source(notebook, metric, label, url, chart, image_path, output_path):
     source = {
         "satellite": notebook.parent.name,
         "name": label,
         "metric": metric,
         "chart": chart,
         "image_url": image_path,
+        "output_url": output_path,
         "path": str(notebook.relative_to(ROOT)),
         "url": url,
         "columns": [],
@@ -459,6 +515,10 @@ class Handler(SimpleHTTPRequestHandler):
             query = parse_qs(parsed.query)
             self.send_notebook_image(query.get("path", [""])[0])
             return
+        if parsed.path == "/api/notebook-output":
+            query = parse_qs(parsed.query)
+            self.send_notebook_output(query.get("path", [""])[0])
+            return
         if parsed.path in {"/", "/index.html"}:
             self.path = "/index.html"
         super().do_GET()
@@ -485,6 +545,25 @@ class Handler(SimpleHTTPRequestHandler):
             return
         self.send_response(200)
         self.send_header("Content-Type", "image/png")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def send_notebook_output(self, requested_path):
+        notebook = (ROOT / requested_path).resolve()
+        if ROOT not in notebook.parents or notebook.suffix != ".ipynb":
+            self.send_error(404, "Output not found")
+            return
+        try:
+            html = notebook_html(notebook)
+        except (OSError, json.JSONDecodeError, ValueError):
+            html = None
+        if not html:
+            self.send_error(404, "Output not found")
+            return
+        body = html.encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)

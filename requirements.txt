@@ -1,3 +1,9 @@
+ipykernel
+matplotlib
+nbconvert
+nbclient
 numpy
+pandas
+plotly
 scipy
 skyfield

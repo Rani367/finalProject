@@ -108,6 +108,14 @@
         width: 100%;
       }
 
+      .notebook-output {
+        background: #ffffff;
+        border: 0;
+        display: block;
+        height: 720px;
+        width: 100%;
+      }
+
       canvas {
         display: block;
         height: 360px;
@@ -282,6 +290,22 @@
         `;
         article.append(header);
 
+        if (source.image_url) {
+          const area = document.createElement("div");
+          area.className = "chart-area";
+          area.innerHTML = `<img class="notebook-graph" src="${escapeAttribute(source.image_url)}" alt="${escapeAttribute(source.satellite)} ${escapeAttribute(source.metric || source.name)} graph">`;
+          article.append(area);
+          return article;
+        }
+
+        if (source.output_url) {
+          const area = document.createElement("div");
+          area.className = "chart-area";
+          area.innerHTML = `<iframe class="notebook-output" src="${escapeAttribute(source.output_url)}" title="${escapeAttribute(source.satellite)} ${escapeAttribute(source.metric || source.name)} notebook output"></iframe>`;
+          article.append(area);
+          return article;
+        }
+
         if (source.view === "geo") {
           return renderGeoSource(article, source);
         }
@@ -296,14 +320,6 @@
 
         if (source.rows?.length) {
           return renderChartSource(article, source);
-        }
-
-        if (source.image_url) {
-          const area = document.createElement("div");
-          area.className = "chart-area";
-          area.innerHTML = `<img class="notebook-graph" src="${escapeAttribute(source.image_url)}" alt="${escapeAttribute(source.satellite)} ${escapeAttribute(source.metric || source.name)} graph">`;
-          article.append(area);
-          return article;
         }
 
         if (source.error) {
