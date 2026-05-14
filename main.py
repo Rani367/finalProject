@@ -118,6 +118,8 @@ def notebook_sources(refresh=False):
     with ThreadPoolExecutor(max_workers=8) as executor:
         sources.extend(executor.map(lambda job: fetch_csv_source(*job), fetch_jobs))
 
+    sources.extend(derived_sources(sources))
+
     _cache["time"] = monotonic()
     _cache["sources"] = sources
     return sources
@@ -126,14 +128,27 @@ def notebook_sources(refresh=False):
 def derived_sources(sources):
     derived = []
     for satellite in ("Tevel11", "Tevel19"):
-        seu_source = find_source(sources, satellite, "SEU")
-        if seu_source:
-            derived.append(seu_globe_source(seu_source))
+        globe_name = f"Globus_SEU_Unatural_{satellite}"
+        if not has_rendered_source(sources, satellite, globe_name):
+            seu_source = find_source(sources, satellite, "SEU")
+            if seu_source:
+                derived.append(seu_globe_source(seu_source))
 
-        solar_source = find_source(sources, satellite, "SolarPanels_Temp")
-        if solar_source:
-            derived.append(spin_speed_source(solar_source))
+        spin_name = f"SpinSpeed_{satellite}"
+        if not has_rendered_source(sources, satellite, spin_name):
+            solar_source = find_source(sources, satellite, "SolarPanels_Temp")
+            if solar_source:
+                derived.append(spin_speed_source(solar_source))
     return derived
+
+
+def has_rendered_source(sources, satellite, name):
+    return any(
+        source.get("satellite") == satellite
+        and source.get("name") == name
+        and (source.get("image_url") or source.get("output_url"))
+        for source in sources
+    )
 
 
 def find_source(sources, satellite, metric):
