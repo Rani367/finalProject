@@ -6,6 +6,7 @@ import ssl
 import urllib.error
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timezone
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from time import monotonic
@@ -28,6 +29,10 @@ ROLLING_COLUMN_RE = re.compile(r"df\[['\"]([^'\"]+)['\"]\]\.rolling\(window=(\d+
 LABEL_RE = re.compile(r"label=['\"]([^'\"]+)")
 CACHE_SECONDS = 300
 _cache = {"time": 0, "sources": None}
+SEU_TLE = (
+    "1 63237U 25052AD  26128.22866333  .00012896  00000-0  43681-3 0  9998",
+    "2 63237  97.3984  23.6624 0004129 290.4131  69.6666 15.30699981 63911",
+)
 
 
 def notebook_sources(refresh=False):
@@ -107,9 +112,243 @@ def notebook_sources(refresh=False):
     with ThreadPoolExecutor(max_workers=8) as executor:
         sources.extend(executor.map(lambda job: fetch_csv_source(*job), fetch_jobs))
 
+    sources.extend(derived_sources(sources))
+
     _cache["time"] = monotonic()
     _cache["sources"] = sources
     return sources
+
+
+def derived_sources(sources):
+    derived = []
+    for satellite in ("Tevel11", "Tevel19"):
+        seu_source = find_source(sources, satellite, "SEU")
+        if seu_source:
+            derived.append(seu_globe_source(seu_source))
+
+        solar_source = find_source(sources, satellite, "SolarPanels_Temp")
+        if solar_source:
+            derived.append(spin_speed_source(solar_source))
+    return derived
+
+
+def find_source(sources, satellite, metric):
+    for source in sources:
+        if source.get("satellite") == satellite and source.get("metric") == metric and source.get("rows"):
+            return source
+    return None
+
+
+def seu_globe_source(source):
+    result = {
+        "satellite": source["satellite"],
+        "name": f"Globus_SEU_Unatural_{source['satellite']}",
+        "metric": "SEU Globe",
+        "view": "geo",
+        "chart": {"title": "SEU Globe", "y_label": "SEU counter", "x_column": "time", "series": []},
+        "path": f"derived/{source['satellite']}/SEU_Globe",
+        "url": source.get("url"),
+        "columns": ["time", "SEU counter", "latitude", "longitude", "altitude_km"],
+        "rows": [],
+        "row_count": 0,
+    }
+    try:
+        from skyfield.api import EarthSatellite, load
+    except ImportError:
+        result["error"] = "Install skyfield to compute SEU globe locations: python3 -m pip install -r requirements.txt"
+        return result
+
+    try:
+        satellite = EarthSatellite(SEU_TLE[0], SEU_TLE[1], "TEVEL2_9")
+        timescale = load.timescale()
+        rows = []
+        for row in source.get("rows", []):
+            seu_counter = to_float(row.get("SEU counter"))
+            if seu_counter <= 0:
+                continue
+            dt = parse_datetime(row.get("time"))
+            if dt is None:
+                continue
+            point = satellite.at(timescale.from_datetime(dt)).subpoint()
+            rows.append(
+                {
+                    "time": dt.isoformat(),
+                    "SEU counter": format_float(seu_counter),
+                    "latitude": format_float(point.latitude.degrees),
+                    "longitude": format_float(point.longitude.degrees),
+                    "altitude_km": format_float(point.elevation.km),
+                }
+            )
+        result["rows"] = rows
+        result["row_count"] = len(rows)
+    except Exception as error:
+        result["error"] = f"Could not compute SEU globe locations: {error}"
+    return result
+
+
+def spin_speed_source(source):
+    result = {
+        "satellite": source["satellite"],
+        "name": f"SpinSpeed_{source['satellite']}",
+        "metric": "SpinSpeed",
+        "view": "chart",
+        "chart": {
+            "title": "Satellite Spin Rate Over Time",
+            "y_label": "Rotations Per Minute (RPM)",
+            "x_column": "time_min",
+            "display": "points",
+            "series": [{"column": f"Panel {index}", "label": f"Panel {index}", "window": 1} for index in range(6)],
+        },
+        "path": f"derived/{source['satellite']}/SpinSpeed",
+        "url": source.get("url"),
+        "columns": ["time_min", "Panel 0", "Panel 1", "Panel 2", "Panel 3", "Panel 4", "Panel 5"],
+        "rows": [],
+        "row_count": 0,
+    }
+    try:
+        import numpy as np
+        from scipy.fft import fft, fftfreq
+        from scipy.signal import find_peaks
+    except ImportError:
+        result["error"] = "Install numpy and scipy to compute spin speed: python3 -m pip install -r requirements.txt"
+        return result
+
+    try:
+        samples = []
+        for row in source.get("rows", []):
+            dt = parse_datetime(row.get("Ground Time"))
+            if dt is None:
+                continue
+            sample = {"datetime": dt}
+            for index in range(6):
+                sample[f"solar_panels{index}"] = to_float(row.get(f"solar_panels{index}"))
+            samples.append(sample)
+        samples.sort(key=lambda row: row["datetime"])
+        if not samples:
+            return result
+
+        start_time = samples[0]["datetime"]
+        for sample in samples:
+            sample["seconds"] = (sample["datetime"] - start_time).total_seconds()
+
+        panel_results = {}
+        for index in range(6):
+            panel_results[f"Panel {index}"] = extract_rpm_over_time(
+                samples,
+                f"solar_panels{index}",
+                np,
+                fft,
+                fftfreq,
+                find_peaks,
+            )
+
+        time_points = sorted({point["time_min"] for points in panel_results.values() for point in points})
+        rows = []
+        for time_min in time_points:
+            row = {"time_min": format_float(time_min)}
+            for panel, points in panel_results.items():
+                match = next((point for point in points if point["time_min"] == time_min), None)
+                row[panel] = format_float(match["rpm"]) if match else ""
+            rows.append(row)
+
+        result["rows"] = rows
+        result["row_count"] = len(rows)
+    except Exception as error:
+        result["error"] = f"Could not compute spin speed: {error}"
+    return result
+
+
+def extract_rpm_over_time(samples, panel_col, np, fft, fftfreq, find_peaks, window_size_sec=1800, step_size_sec=600):
+    results = []
+    max_time = max(sample["seconds"] for sample in samples)
+
+    for start in np.arange(0, max_time - window_size_sec, step_size_sec):
+        end = start + window_size_sec
+        window = [
+            sample
+            for sample in samples
+            if start <= sample["seconds"] < end and to_float(sample.get(panel_col)) == to_float(sample.get(panel_col))
+        ]
+        if len(window) < 20:
+            continue
+
+        signal = np.array([sample[panel_col] for sample in window], dtype=float)
+        times = np.array([sample["seconds"] for sample in window], dtype=float)
+        diffs = np.diff(times)
+        if not len(diffs):
+            continue
+
+        dt = np.mean(diffs)
+        if not np.isfinite(dt) or dt <= 0:
+            continue
+
+        centered = signal - np.mean(signal)
+        yf = np.abs(fft(centered))
+        xf = fftfreq(len(signal), dt)
+        mask = (xf > 0.0001) & (xf < 0.2)
+        xf_f = xf[mask]
+        yf_f = yf[mask]
+        if len(yf_f) == 0:
+            continue
+
+        peaks, _ = find_peaks(yf_f, prominence=(np.max(yf_f) * 0.05) + 0.001)
+        if len(peaks) == 0:
+            continue
+
+        best_peak_idx = peaks[np.argmax(yf_f[peaks])]
+        results.append(
+            {
+                "time_min": round(float((start + (window_size_sec / 2)) / 60), 6),
+                "rpm": float(xf_f[best_peak_idx] * 60),
+            }
+        )
+    return results
+
+
+def parse_datetime(value):
+    if value is None or value == "":
+        return None
+    text = str(value).strip()
+    for day_first in (True, False):
+        match = re.match(r"^(\d{1,2})[\/.-](\d{1,2})[\/.-](\d{2,4})(?:[ T](\d{1,2}):(\d{2})(?::(\d{2}))?)?", text)
+        if not match:
+            continue
+        first, second, year, hour, minute, second_value = match.groups()
+        year = int(year) + 2000 if len(year) == 2 else int(year)
+        day = int(first if day_first else second)
+        month = int(second if day_first else first)
+        try:
+            return datetime(
+                year,
+                month,
+                day,
+                int(hour or 0),
+                int(minute or 0),
+                int(second_value or 0),
+                tzinfo=timezone.utc,
+            )
+        except ValueError:
+            continue
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def to_float(value):
+    if value is None or value == "":
+        return float("nan")
+    try:
+        return float(str(value).replace(",", ""))
+    except ValueError:
+        return float("nan")
+
+
+def format_float(value):
+    return f"{float(value):.10g}"
 
 
 def chart_definition(text, metric):

@@ -114,6 +114,11 @@
         width: 100%;
       }
 
+      .geo-chart {
+        min-height: 520px;
+        width: 100%;
+      }
+
       .legend {
         display: flex;
         flex-wrap: wrap;
@@ -166,6 +171,7 @@
       <section id="content"></section>
     </main>
 
+    <script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
     <script>
       const statusEl = document.querySelector("#status");
       const contentEl = document.querySelector("#content");
@@ -173,24 +179,48 @@
       const satelliteEl = document.querySelector("#satellite");
       const reloadEl = document.querySelector("#reload");
       const colors = ["#2563eb", "#dc2626", "#16a34a", "#9333ea", "#ea580c", "#0891b2"];
+      const refreshIntervalMs = 5 * 60 * 1000;
       let sources = [];
+      let lastDataSource = "static";
 
-      async function loadData() {
-        statusEl.textContent = "Loading data...";
-        contentEl.innerHTML = "";
+      async function loadData({ refresh = false, quiet = false } = {}) {
+        if (!quiet) {
+          statusEl.textContent = "Loading data...";
+          contentEl.innerHTML = "";
+        }
 
         try {
-          const response = await fetch(`data.json?time=${Date.now()}`);
-          if (!response.ok) {
-            throw new Error(`HTTP ${response.status}`);
-          }
+          const response = await fetchData(refresh);
           const data = await response.json();
           sources = data.sources || [];
+          lastDataSource = response.sourceName;
           fillSatelliteFilter();
           render();
         } catch (error) {
-          statusEl.textContent = `Failed to load data: ${error.message}`;
+          if (!quiet) {
+            statusEl.textContent = `Failed to load data: ${error.message}`;
+          }
         }
+      }
+
+      async function fetchData(refresh) {
+        const liveUrl = `/api/data?refresh=${refresh ? "1" : "0"}&time=${Date.now()}`;
+        try {
+          const liveResponse = await fetch(liveUrl);
+          if (liveResponse.ok) {
+            liveResponse.sourceName = "live";
+            return liveResponse;
+          }
+        } catch (_) {
+          // Static file fallback keeps exported deployments usable.
+        }
+
+        const staticResponse = await fetch(`data.json?time=${Date.now()}`);
+        if (!staticResponse.ok) {
+          throw new Error(`HTTP ${staticResponse.status}`);
+        }
+        staticResponse.sourceName = "static";
+        return staticResponse;
       }
 
       function fillSatelliteFilter() {
@@ -221,7 +251,7 @@
             source.name,
             source.metric,
             source.path,
-            ...source.columns,
+            ...(source.columns || []),
           ]
             .join(" ")
             .toLowerCase();
@@ -229,7 +259,7 @@
         });
 
         const totalRows = filtered.reduce((sum, source) => sum + source.row_count, 0);
-        statusEl.textContent = `${filtered.length} datasets, ${totalRows.toLocaleString()} rows`;
+        statusEl.textContent = `${filtered.length} datasets, ${totalRows.toLocaleString()} rows · ${lastDataSource} data`;
         contentEl.innerHTML = "";
 
         for (const source of filtered) {
@@ -252,6 +282,22 @@
         `;
         article.append(header);
 
+        if (source.view === "geo") {
+          return renderGeoSource(article, source);
+        }
+
+        if (source.error && !(source.rows || []).length) {
+          const error = document.createElement("div");
+          error.className = "error";
+          error.textContent = source.error;
+          article.append(error);
+          return article;
+        }
+
+        if (source.rows?.length) {
+          return renderChartSource(article, source);
+        }
+
         if (source.image_url) {
           const area = document.createElement("div");
           area.className = "chart-area";
@@ -268,6 +314,10 @@
           return article;
         }
 
+        return renderChartSource(article, source);
+      }
+
+      function renderChartSource(article, source) {
         const chart = buildChartData(source);
         if (!chart.series.length) {
           const empty = document.createElement("div");
@@ -295,13 +345,40 @@
         return article;
       }
 
+      function renderGeoSource(article, source) {
+        if (source.error) {
+          const error = document.createElement("div");
+          error.className = "error";
+          error.textContent = source.error;
+          article.append(error);
+          return article;
+        }
+
+        const rows = source.rows || [];
+        if (!rows.length) {
+          const empty = document.createElement("div");
+          empty.className = "error";
+          empty.textContent = "No SEU anomalies above the threshold were found.";
+          article.append(empty);
+          return article;
+        }
+
+        const area = document.createElement("div");
+        area.className = "chart-area";
+        area.innerHTML = `<div class="geo-chart"></div>`;
+        article.append(area);
+        requestAnimationFrame(() => drawGeo(area.querySelector(".geo-chart"), source));
+        return article;
+      }
+
       function buildChartData(source) {
+        const columns = source.columns || [];
         const timeColumn = source.chart?.x_column
-          || source.columns.find((column) => column.toLowerCase() === "time")
-          || source.columns.find((column) => column.toLowerCase().includes("time"));
+          || columns.find((column) => column.toLowerCase() === "time")
+          || columns.find((column) => column.toLowerCase().includes("time"));
         const chartSeries = source.chart?.series?.length
           ? source.chart.series
-          : source.columns.map((column) => ({ column, label: column, window: 1 }));
+          : columns.map((column) => ({ column, label: column, window: 1 }));
         const usableSeries = chartSeries.filter((serie) => {
           const column = serie.column;
           if (!column || column === timeColumn || column.toLowerCase() === "raw") {
@@ -324,7 +401,51 @@
           name: serie.name,
           values: indexes.map((index) => serie.values[index]),
         }));
-        return { labels, series };
+        return { labels, series, display: source.chart?.display || "lines" };
+      }
+
+      function drawGeo(container, source) {
+        if (!window.Plotly) {
+          container.className = "error";
+          container.textContent = "Plotly could not be loaded for the SEU globe.";
+          return;
+        }
+
+        const rows = source.rows || [];
+        const sizes = rows.map((row) => Math.max(6, Math.min(26, Math.sqrt(Math.max(1, toNumber(row["SEU counter"]))) * 4)));
+        Plotly.newPlot(
+          container,
+          [{
+            type: "scattergeo",
+            mode: "markers",
+            lat: rows.map((row) => toNumber(row.latitude)),
+            lon: rows.map((row) => toNumber(row.longitude)),
+            text: rows.map((row) => `${row.time}<br>SEU counter: ${row["SEU counter"]}<br>Altitude: ${formatNumber(toNumber(row.altitude_km))} km`),
+            hovertemplate: "%{text}<extra></extra>",
+            marker: {
+              color: "#dc2626",
+              opacity: 0.72,
+              size: sizes,
+              line: { color: "#7f1d1d", width: 1 },
+            },
+          }],
+          {
+            title: source.chart?.title || source.metric || source.name,
+            height: 520,
+            margin: { l: 0, r: 0, t: 48, b: 0 },
+            showlegend: false,
+            geo: {
+              projection: { type: "equirectangular" },
+              showcountries: true,
+              showcoastlines: true,
+              showland: true,
+              landcolor: "rgb(230,230,230)",
+              oceancolor: "rgb(180,220,255)",
+              showocean: true,
+            },
+          },
+          { responsive: true, displayModeBar: false },
+        );
       }
 
       function rollingMean(values, windowSize) {
@@ -423,6 +544,7 @@
 
         chart.series.forEach((serie, index) => {
           ctx.strokeStyle = colors[index % colors.length];
+          ctx.fillStyle = colors[index % colors.length];
           ctx.lineWidth = 2;
           ctx.beginPath();
           let hasPoint = false;
@@ -432,6 +554,11 @@
             }
             const x = padding.left + (width * pointIndex) / Math.max(1, serie.values.length - 1);
             const y = padding.top + height - ((value - min) / (max - min)) * height;
+            if (chart.display === "points") {
+              ctx.moveTo(x + 3, y);
+              ctx.arc(x, y, 3, 0, Math.PI * 2);
+              return;
+            }
             if (hasPoint) {
               ctx.lineTo(x, y);
             } else {
@@ -439,7 +566,11 @@
               hasPoint = true;
             }
           });
-          ctx.stroke();
+          if (chart.display === "points") {
+            ctx.fill();
+          } else {
+            ctx.stroke();
+          }
         });
       }
 
@@ -496,12 +627,14 @@
       searchEl.addEventListener("input", render);
       satelliteEl.addEventListener("change", render);
       reloadEl.addEventListener("click", () => {
-        reloadEl.dataset.refresh = "1";
-        loadData().finally(() => {
+        reloadEl.disabled = true;
+        loadData({ refresh: true }).finally(() => {
+          reloadEl.disabled = false;
           reloadEl.dataset.refresh = "";
         });
       });
       loadData();
+      window.setInterval(() => loadData({ refresh: true, quiet: true }), refreshIntervalMs);
     </script>
   </body>
 </html>
