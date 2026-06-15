@@ -19,15 +19,15 @@
       header {
         background: #ffffff;
         border-bottom: 1px solid #d9e1ea;
-        padding: 22px 28px;
+        padding: 11px 14px;
         position: sticky;
         top: 0;
         z-index: 2;
       }
 
       h1 {
-        font-size: 28px;
-        margin: 0 0 14px;
+        font-size: 14px;
+        margin: 0 0 7px;
       }
 
       .toolbar {
@@ -148,6 +148,62 @@
         width: 10px;
       }
 
+      .header-inner {
+        align-items: center;
+        display: flex;
+        flex-wrap: wrap;
+        gap: 16px 26px;
+        justify-content: space-between;
+      }
+
+      .header-text {
+        flex: 1 1 340px;
+      }
+
+      .header-text h1 {
+        margin-bottom: 6px;
+      }
+
+      .subtitle {
+        color: #506176;
+        font-size: 11px;
+        margin: 0 0 7px;
+      }
+
+      .satellite-stage {
+        flex: 0 0 auto;
+        height: 160px;
+        width: 190px;
+        cursor: grab;
+      }
+
+      .satellite-stage:active {
+        cursor: grabbing;
+      }
+
+      .satellite-stage canvas {
+        display: block;
+        height: 100%;
+        width: 100%;
+      }
+
+      .satellite-fallback {
+        align-items: center;
+        display: flex;
+        font-size: 70px;
+        height: 100%;
+        justify-content: center;
+      }
+
+      .graph-description {
+        color: #4a5b70;
+        font-size: 14px;
+        line-height: 1.5;
+        margin: 0;
+        padding: 10px 16px 16px;
+        border-top: 1px solid #edf1f6;
+      }
+
       @media (max-width: 700px) {
         header,
         main {
@@ -160,18 +216,28 @@
         button {
           width: 100%;
         }
+
+        .satellite-stage {
+          margin: 4px auto 0;
+        }
       }
     </style>
   </head>
   <body>
     <header>
-      <h1>Tevel Data Viewer</h1>
-      <div class="toolbar">
-        <input id="search" type="search" placeholder="Search graphs">
-        <select id="satellite">
-          <option value="">All satellites</option>
-        </select>
-        <button id="reload" type="button">Reload data</button>
+      <div class="header-inner">
+        <div class="header-text">
+          <h1>Tevel Data Viewer</h1>
+          <p class="subtitle">Live telemetry from the Tevel CubeSat constellation</p>
+          <div class="toolbar">
+            <input id="search" type="search" placeholder="Search graphs">
+            <select id="satellite">
+              <option value="">All satellites</option>
+            </select>
+            <button id="reload" type="button">Reload data</button>
+          </div>
+        </div>
+        <div id="satellite-stage" class="satellite-stage" role="img" aria-label="Rotating 3D model of a space satellite"></div>
       </div>
     </header>
     <main>
@@ -188,6 +254,20 @@
       const reloadEl = document.querySelector("#reload");
       const colors = ["#2563eb", "#dc2626", "#16a34a", "#9333ea", "#ea580c", "#0891b2"];
       const refreshIntervalMs = 5 * 60 * 1000;
+      const seuGlobeDescription =
+        "Map of where each SEU radiation hit happened, reconstructed from the satellite's orbit. The dense cluster marks the South Atlantic Anomaly, where Earth's inner radiation belt dips lowest.";
+      const graphDescriptions = {
+        SEU: "Single Event Upsets — bit-flips in the satellite's memory caused by high-energy cosmic particles. The count jumps each time Tevel crosses the radiation-rich South Atlantic Anomaly.",
+        SEL: "Single Event Latch-ups — radiation-induced short circuits in the onboard electronics. Each spike marks a protective power-cycle of the affected part.",
+        Temp: "Onboard temperature over time. The repeating rise and fall follows the satellite heating in sunlight and cooling through each orbital eclipse.",
+        Adc1: "Raw readings from analog-to-digital converter channel 1, one of the satellite's onboard sensor inputs.",
+        Adc2: "Raw readings from analog-to-digital converter channel 2, one of the satellite's onboard sensor inputs.",
+        VoltBattery: "Battery voltage over time — the satellite's state of charge. It dips during eclipse and recovers while the solar panels are lit.",
+        SolarPanels_Temp: "Temperature of each of the six solar panels. Their cyclic swings reveal the satellite slowly spinning as panels turn in and out of the Sun.",
+        SpinSpeed: "Spin rate in rotations per minute, recovered from the solar-panel signal with an FFT. Each panel's periodic lighting shows how fast Tevel is rotating.",
+        Globus_SEU_Unatural: seuGlobeDescription,
+        "SEU Globe": seuGlobeDescription,
+      };
       let sources = [];
       let lastDataSource = "static";
 
@@ -275,6 +355,15 @@
         }
       }
 
+      function appendDescription(article, source) {
+        const description = graphDescriptions[source.metric];
+        if (!description) return;
+        const note = document.createElement("p");
+        note.className = "graph-description";
+        note.textContent = description;
+        article.append(note);
+      }
+
       function renderSource(source, query) {
         const article = document.createElement("article");
         article.className = "dataset";
@@ -295,6 +384,7 @@
           area.className = "chart-area";
           area.innerHTML = `<img class="notebook-graph" src="${escapeAttribute(source.image_url)}" alt="${escapeAttribute(source.satellite)} ${escapeAttribute(source.metric || source.name)} graph">`;
           article.append(area);
+          appendDescription(article, source);
           return article;
         }
 
@@ -303,6 +393,7 @@
           area.className = "chart-area";
           area.innerHTML = `<iframe class="notebook-output" src="${escapeAttribute(source.output_url)}" title="${escapeAttribute(source.satellite)} ${escapeAttribute(source.metric || source.name)} notebook output"></iframe>`;
           article.append(area);
+          appendDescription(article, source);
           return article;
         }
 
@@ -358,6 +449,7 @@
         `;
         article.append(area);
         requestAnimationFrame(() => drawChart(area.querySelector("canvas"), chart));
+        appendDescription(article, source);
         return article;
       }
 
@@ -384,6 +476,7 @@
         area.innerHTML = `<div class="geo-chart"></div>`;
         article.append(area);
         requestAnimationFrame(() => drawGeo(area.querySelector(".geo-chart"), source));
+        appendDescription(article, source);
         return article;
       }
 
@@ -651,6 +744,86 @@
       });
       loadData();
       window.setInterval(() => loadData({ refresh: true, quiet: true }), refreshIntervalMs);
+    </script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/loaders/GLTFLoader.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
+    <script>
+      (function initSatelliteModel() {
+        const stage = document.querySelector("#satellite-stage");
+        if (!stage) return;
+
+        const showFallback = () => {
+          stage.innerHTML = `<div class="satellite-fallback">🛰️</div>`;
+        };
+
+        if (!window.THREE) { showFallback(); return; }
+
+        let renderer;
+        try {
+          renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+        } catch (e) { showFallback(); return; }
+
+        const width = stage.clientWidth || 380;
+        const height = stage.clientHeight || 320;
+        renderer.setPixelRatio(window.devicePixelRatio || 1);
+        renderer.setSize(width, height);
+        renderer.outputEncoding = THREE.sRGBEncoding;
+        stage.append(renderer.domElement);
+
+        const scene = new THREE.Scene();
+        const camera = new THREE.PerspectiveCamera(40, width / height, 0.1, 1000);
+        camera.position.set(0, 1, 7);
+
+        const controls = new THREE.OrbitControls(camera, renderer.domElement);
+        controls.enableDamping = true;
+        controls.dampingFactor = 0.08;
+        controls.enablePan = false;
+        controls.minDistance = 3;
+        controls.maxDistance = 20;
+        controls.autoRotate = true;
+        controls.autoRotateSpeed = 1.5;
+
+        stage.addEventListener("pointerdown", () => { controls.autoRotate = false; });
+
+        scene.add(new THREE.AmbientLight(0xffffff, 0.8));
+        const sun = new THREE.DirectionalLight(0xffffff, 1.2);
+        sun.position.set(4, 5, 6);
+        scene.add(sun);
+        const rim = new THREE.DirectionalLight(0x88aaff, 0.4);
+        rim.position.set(-5, -2, -4);
+        scene.add(rim);
+
+        const loader = new THREE.GLTFLoader();
+        loader.load(
+          "space_satellite.glb",
+          (gltf) => {
+            const model = gltf.scene;
+            const box = new THREE.Box3().setFromObject(model);
+            const center = box.getCenter(new THREE.Vector3());
+            const size = box.getSize(new THREE.Vector3());
+            model.position.sub(center);
+            model.scale.setScalar(3 / Math.max(size.x, size.y, size.z));
+            scene.add(model);
+          },
+          null,
+          showFallback
+        );
+
+        window.addEventListener("resize", () => {
+          const w = stage.clientWidth || width;
+          const h = stage.clientHeight || height;
+          renderer.setSize(w, h);
+          camera.aspect = w / h;
+          camera.updateProjectionMatrix();
+        });
+
+        (function animate() {
+          controls.update();
+          renderer.render(scene, camera);
+          requestAnimationFrame(animate);
+        })();
+      })();
     </script>
   </body>
 </html>
